@@ -1,0 +1,11 @@
+.git
+.gitignore
+.crush
+__pycache__
+*.pyc
+dist
+build
+*.egg-info
+mcp.json
+.env
+.env.*

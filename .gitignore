@@ -1,0 +1,26 @@
+# Secrets - never commit real Vast.ai keys or local MCP client config
+mcp.json
+.env
+.env.*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Build artifacts
+dist/
+build/
+
+# Editor / tool local state
+.crush/
+.vscode/
+.idea/
+
+# OS cruft
+.DS_Store
+Thumbs.db
