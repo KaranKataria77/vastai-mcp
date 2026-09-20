@@ -81,6 +81,15 @@ class PerRequestVastKeyMiddleware:
             await self.app(scope, receive, send)
             return
 
+        # Starlette's Mount only matches "/mcp/..." (it internally requires
+        # the trailing slash) and otherwise 307-redirects bare "/mcp" to
+        # "/mcp/". Many MCP/HTTP clients (including claude.ai's remote-
+        # connector infra) don't follow that redirect, so normalize the path
+        # here before it ever reaches the router, instead of relying on
+        # every caller to follow a redirect or already use the slash.
+        if scope["path"] == "/mcp":
+            scope = {**scope, "path": "/mcp/"}
+
         headers = dict(scope.get("headers") or [])
         raw_key = headers.get(b"x-api-key")
         if not raw_key or not raw_key.decode().strip():
