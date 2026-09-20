@@ -27,7 +27,7 @@ from mcp.server.lowlevel import Server
 BASE_URL = "https://console.vast.ai"
 
 # Set per-request by server_http.py's auth middleware (from the caller's
-# X-Vast-Api-Key header) so a multi-tenant HTTP deployment bills each caller's
+# X-Api-Key header) so a multi-tenant HTTP deployment bills each caller's
 # own Vast.ai account. stdio mode (server.py run directly) never sets this and
 # falls back to the VAST_API_KEY environment variable below.
 _request_api_key: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -52,7 +52,7 @@ def _api_key() -> str:
     if not key:
         raise RuntimeError(
             "No Vast.ai API key available. Set VAST_API_KEY (stdio mode) or "
-            "send an X-Vast-Api-Key header (HTTP mode). Create a key at "
+            "send an X-Api-Key header (HTTP mode). Create a key at "
             "cloud.vast.ai."
         )
     return key

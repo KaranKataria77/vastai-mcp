@@ -2,7 +2,7 @@
 
 Run:  vastai-mcp-http   (console script; or `python -m vastai_mcp.server_http`)
 Env:  VAST_API_KEY=<your key>  (fallback only — HTTP callers should send
-      X-Vast-Api-Key per request instead, see below)
+      X-Api-Key per request instead, see below)
       MCP_HOST=0.0.0.0  (default)
       MCP_PORT=8000     (default)
 
@@ -11,7 +11,7 @@ Endpoints:
   POST /mcp     -> MCP streamable-HTTP endpoint (JSON-RPC, JSON responses)
 
 Multi-tenant auth: this server holds no Vast.ai key of its own. Every /mcp
-request must carry the caller's own key in the `X-Vast-Api-Key` header; that
+request must carry the caller's own key in the `X-Api-Key` header; that
 key is used for that request only, so billing/rentals happen against the
 caller's Vast.ai account, not the operator's. Requests without the header are
 rejected with 401 before they reach the MCP layer.
@@ -59,12 +59,17 @@ mcp_asgi = StreamableHTTPASGIApp(session_manager)
 
 
 class PerRequestVastKeyMiddleware:
-    """Gate /mcp on a caller-supplied X-Vast-Api-Key header.
+    """Gate /mcp on a caller-supplied X-Api-Key header.
 
     Sets it as a contextvar for the duration of the request so server.py's
     _api_key() picks it up instead of any server-side env var, keeping each
     caller's Vast.ai billing/rentals on their own account. Plain ASGI (not
     BaseHTTPMiddleware) so streaming MCP responses aren't buffered.
+
+    X-Api-Key (rather than a Vast.ai-specific header name) is used because
+    it's one of the header names Claude's remote-MCP "Request headers" auth
+    pre-approves without requiring Anthropic support to allowlist a custom
+    name.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -76,12 +81,12 @@ class PerRequestVastKeyMiddleware:
             return
 
         headers = dict(scope.get("headers") or [])
-        raw_key = headers.get(b"x-vast-api-key")
+        raw_key = headers.get(b"x-api-key")
         if not raw_key or not raw_key.decode().strip():
             response = JSONResponse(
                 {
                     "error": (
-                        "Missing X-Vast-Api-Key header. Every request must "
+                        "Missing X-Api-Key header. Every request must "
                         "include your own Vast.ai API key so rentals and "
                         "billing apply to your account, not the server "
                         "operator's."
