@@ -1,5 +1,6 @@
 # Secrets - never commit real Vast.ai keys or local MCP client config
 mcp.json
+.mcp.json
 .env
 .env.*
 

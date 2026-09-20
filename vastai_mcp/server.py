@@ -1,7 +1,6 @@
 """Vast.ai MCP server.
 
 Exposes Vast.ai cloud operations as MCP tools:
-  - list_gpus: current GPU supply / demand / pricing snapshot
   - search_offers: find rentable GPU machine offers
   - create_volume: rent a new persistent volume
   - list_volumes: list your rented volumes
@@ -86,29 +85,6 @@ def _request(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 TOOLS: list[types.Tool] = [
-    types.Tool(
-        name="list_gpus",
-        description=(
-            "Show the current snapshot of all available GPUs on Vast.ai: "
-            "total supply, available count, and 10th/median/90th percentile "
-            "pricing per GPU model."
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "hosting_type": {
-                    "type": "string",
-                    "enum": ["all", "secure_cloud", "community"],
-                    "description": "Filter by hosting type (default: all).",
-                },
-                "verified": {
-                    "type": "string",
-                    "enum": ["yes", "no", "all"],
-                    "description": "Filter by host verification (default: yes).",
-                },
-            },
-        },
-    ),
     types.Tool(
         name="search_offers",
         description=(
@@ -294,32 +270,6 @@ def tool(fn: Any) -> Any:
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
-
-
-@tool
-def list_gpus(hosting_type: str = "all", verified: str = "yes") -> dict[str, Any]:
-    """Current supply/demand/pricing snapshot across all GPU types."""
-    try:
-        resp = _request(
-            "GET",
-            "/api/v0/metrics/gpu/current/",
-            params={"hosting_type": hosting_type, "verified": verified},
-        )
-    except RuntimeError as exc:
-        msg = str(exc)
-        if "machine_read" in msg:
-            return {
-                "success": False,
-                "msg": "This API key lacks the 'machine_read' permission group.",
-                "hint": (
-                    "Create a key with machine_read at cloud.vast.ai, or use the "
-                    "search_offers tool (it works with the current permissions)."
-                ),
-            }
-        raise
-    if resp.get("success") is False:
-        return {"success": False, "msg": resp.get("msg")}
-    return resp
 
 
 @tool

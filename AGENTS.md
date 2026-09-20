@@ -29,8 +29,9 @@ When adding a tool: add a `types.Tool` entry to `TOOLS`, add a matching `@tool`-
 - `search_offers` → `POST /api/v0/bundles/` with a JSON query body. Filters use operator dicts (`{"eq": ...}`, `{"gte": ...}`, `{"in": [...]}`), not flat query params. `order` is a list of `[field, direction]` pairs.
 - `create_instance` → `PUT /api/v0/asks/{offer_id}` (the "ask id" is the offer id returned by search_offers). Volumes are attached via a `volume_info` object: `create_new: true` + `size` to create on the fly, or `create_new: false` + `volume_id` to attach existing.
 - `create_volume` is synthesized: the API has no standalone create endpoint. It searches `POST /api/v0/search/volumes/` then rents via `PUT /api/v0/volumes` (which is normally the resize endpoint). Fails with a guidance message if no matching offer exists.
-- `list_gpus` → `GET /api/v0/metrics/gpu/current/`. Requires the `machine_read` permission group on the API key; the handler special-cases the error string and returns a hint suggesting `search_offers` instead.
 - `billing_summary` combines `GET /api/v0/instances/` with `GET /api/v1/invoices` (note v1, not v0; `select_filters` is a JSON-encoded string param, capped at 200).
+
+**Never add a tool backed by a host-only endpoint.** This server is for renters/clients only. Any Vast.ai endpoint gated by the `machine_read` or `machine_write` permission groups (docs.vast.ai marks these "Viewing/Managing machines... (hosts)") is host-side and out of scope — do not wire it up, even if it looks useful for a renter-facing feature. `list_gpus` (`GET /api/v0/metrics/gpu/current/`) was removed for this reason; use `search_offers` for GPU availability/pricing instead.
 
 ## Gotchas
 
@@ -41,7 +42,7 @@ When adding a tool: add a `types.Tool` entry to `TOOLS`, add a matching `@tool`-
 - The `create_volume` docstring is partially stale/aspirational (it describes a "search + ask flow" that isn't what the code does). Trust the code.
 - Tool handlers are synchronous and make blocking network calls inside the async MCP dispatch loop. This is fine for low concurrency but don't assume async-safety when adding tools.
 - `on_call_tool` catches all exceptions and returns them as `is_error=True` text results, so Vast.ai API errors surface to the client as tool results, not as MCP protocol errors.
-- API key permission groups vary: `machine_read` gates `list_gpus`; invoice access gates part of `billing_summary` (which degrades gracefully). When testing a new tool, a permission error doesn't necessarily mean the code is wrong.
+- API key permission groups vary: invoice access gates part of `billing_summary` (which degrades gracefully). When testing a new tool, a permission error doesn't necessarily mean the code is wrong.
 - Vast.ai response field names are inconsistent (e.g. cost fields live under `instance`, `search`, or the top level); `billing_summary` falls back through several field names. Follow the same defensive pattern when reading API responses.
 
 ## Conventions

@@ -50,7 +50,6 @@ a real secret.)
 
 | Tool | Description |
 | --- | --- |
-| `list_gpus` | Current GPU supply/demand/pricing snapshot. |
 | `search_offers` | Search rentable machine offers (filter by GPU, price, disk, country). |
 | `create_volume` | Rent a new persistent volume (searches a matching volume offer and rents it). |
 | `list_volumes` | List your rented volumes. |
@@ -59,8 +58,7 @@ a real secret.)
 
 ### Typical workflow
 
-1. `list_gpus` to see what's available.
-2. `search_offers(gpu_name="RTX 4090", max_price=1.0, limit=10)` to find a machine.
-3. `billing_summary` to check current spend.
+1. `search_offers(gpu_name="RTX 4090", max_price=1.0, limit=10)` to find a machine.
+2. `billing_summary` to check current spend.
 4. `create_instance(offer_id=123, max_hourly_price=1.0, volume={"size_gb": 100, "mount_path": "/data"})`
    to launch (refuses if the offer's live price exceeds `max_hourly_price`).
