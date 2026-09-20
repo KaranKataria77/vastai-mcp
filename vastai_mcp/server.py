@@ -2,9 +2,11 @@
 
 Exposes Vast.ai cloud operations as MCP tools:
   - search_offers: find rentable GPU machine offers
-  - create_volume: rent a new persistent volume
+  - create_volume: rent a new standalone persistent volume
   - list_volumes: list your rented volumes
+  - delete_volume: delete a rented volume
   - create_instance: rent a machine (ask/offer) with optional volume
+  - destroy_instance: terminate a rented instance
   - billing_summary: instance hourly costs + recent charges
 
 Auth: set VAST_API_KEY (Authorization: Bearer <key>).
@@ -155,6 +157,23 @@ TOOLS: list[types.Tool] = [
         input_schema={"type": "object", "properties": {}},
     ),
     types.Tool(
+        name="delete_volume",
+        description=(
+            "Delete a rented volume by its id (from list_volumes), stopping "
+            "its billing immediately. Irreversible."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "volume_id": {
+                    "type": "integer",
+                    "description": "Volume id to delete, as returned by list_volumes or create_volume.",
+                },
+            },
+            "required": ["volume_id"],
+        },
+    ),
+    types.Tool(
         name="create_instance",
         description=(
             "Create (rent) a new instance on a specific machine offer (ask id "
@@ -257,6 +276,27 @@ TOOLS: list[types.Tool] = [
             },
         },
     ),
+    types.Tool(
+        name="destroy_instance",
+        description=(
+            "Destroy (terminate) a rented instance by its contract/instance id "
+            "(the new_contract id returned by create_instance). This stops "
+            "billing for the instance immediately and is irreversible."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "integer",
+                    "description": (
+                        "Instance/contract id to destroy, as returned by "
+                        "create_instance (new_contract) or billing_summary."
+                    ),
+                },
+            },
+            "required": ["instance_id"],
+        },
+    ),
 ]
 
 HANDLERS: dict[str, Any] = {}
@@ -314,39 +354,58 @@ def search_offers(
 
 @tool
 def create_volume(size_gb: int) -> dict[str, Any]:
-    """Rent a new persistent volume.
+    """Rent a new standalone persistent volume, not attached to any instance.
 
-    The public REST surface exposes PUT /api/v0/volumes (resize) and
-    create-on-attach via instance creation. We therefore create a 1-slot
-    volume offer through the search + ask flow if a standalone create is not
-    available; this helper uses the documented rent-volume path with a fresh
-    volume id request.
+    There is no dedicated volume-search endpoint; standalone volumes are
+    rented the same way an instance's on-the-fly volume is: pick a GPU
+    offer's local volume slot (avail_vol_ask_id, from /api/v0/bundles/) with
+    enough free space, then PUT /api/v0/volumes with that id and the
+    requested size.
     """
-    # Vast.ai creates volumes on the fly when attaching to an instance
-    # (volume_info.create_new). A standalone "create volume" is realized by
-    # renting a volume offer: search for a matching volume offer and rent it.
     offers = _request(
         "POST",
-        "/api/v0/search/volumes/",
-        json={"limit": 10, "size_gb": {"gte": size_gb}},
+        "/api/v0/bundles/",
+        json={
+            "limit": 10,
+            "type": "on-demand",
+            "verified": {"eq": True},
+            "rentable": {"eq": True},
+            "rented": {"eq": False},
+            "external": {"eq": False},
+            "avail_vol_size": {"gte": size_gb},
+            "order": [["avail_vol_size", "asc"]],
+        },
     )
-    vol_offers = offers.get("volumes") or offers.get("offers") or []
+    vol_offers = [o for o in (offers.get("offers") or []) if o.get("avail_vol_ask_id")]
     if not vol_offers:
         return {
             "success": False,
             "error": (
-                f"No volume offer found with size >= {size_gb} GB. "
-                "Try a larger size or attach the volume at instance creation "
-                "(create_instance with volume={size_gb, mount_path})."
+                f"No offer found with a free volume slot >= {size_gb} GB. "
+                "Try a smaller size, or attach a volume at instance creation "
+                "instead (create_instance with volume={size_gb, mount_path})."
             ),
         }
-    offer = sorted(vol_offers, key=lambda v: v.get("size_gb", 0))[0]
-    rent = _request(
+    offer = vol_offers[0]
+    return _request(
         "PUT",
         "/api/v0/volumes",
-        json={"id": offer.get("id"), "size": size_gb},
+        json={"id": offer["avail_vol_ask_id"], "size": size_gb},
     )
-    return rent
+
+
+@tool
+def delete_volume(volume_id: int) -> dict[str, Any]:
+    """Delete a rented volume by its id (from list_volumes), stopping billing.
+
+    Volumes are deleted through /api/v0/instances/{id}/ when standalone, but
+    a volume left over after its parent instance was already destroyed needs
+    /api/v0/volumes instead; this tries the former first and falls back.
+    """
+    try:
+        return _request("DELETE", f"/api/v0/instances/{volume_id}/")
+    except RuntimeError:
+        return _request("DELETE", "/api/v0/volumes", json={"id": volume_id})
 
 
 @tool
@@ -355,17 +414,23 @@ def list_volumes() -> dict[str, Any]:
     return _request("GET", "/api/v0/volumes/")
 
 
-def _offer_price(offer_id: int) -> float | None:
-    """Fetch the live dph_total for a single offer, or None if not found."""
+def _offer_lookup(offer_id: int) -> dict[str, Any] | None:
+    """Fetch the live bundle for a single offer, or None if not found."""
     resp = _request(
         "POST",
         "/api/v0/bundles/",
-        json={"limit": 1, "id": {"eq": offer_id}},
+        json={
+            "limit": 1,
+            "type": "on-demand",
+            "verified": {"eq": True},
+            "rentable": {"eq": True},
+            "rented": {"eq": False},
+            "external": {"eq": False},
+            "ask_contract_id": {"eq": offer_id},
+        },
     )
     offers = resp.get("offers") or []
-    if not offers:
-        return None
-    return float(offers[0].get("dph_total") or 0.0)
+    return offers[0] if offers else None
 
 
 @tool
@@ -386,8 +451,8 @@ def create_instance(
     can't be verified, so a caller (human or LLM) always states a spend cap
     up front instead of trusting a possibly-stale or hallucinated offer_id.
     """
-    price = _offer_price(offer_id)
-    if price is None:
+    offer = _offer_lookup(offer_id)
+    if offer is None:
         return {
             "success": False,
             "error": (
@@ -397,6 +462,7 @@ def create_instance(
                 "offer_id."
             ),
         }
+    price = float(offer.get("dph_total") or 0.0)
     if price > max_hourly_price:
         return {
             "success": False,
@@ -424,10 +490,28 @@ def create_instance(
             vol_info["create_new"] = False
             vol_info["volume_id"] = volume["volume_id"]
         else:
+            avail_vol_ask_id = offer.get("avail_vol_ask_id")
+            if not avail_vol_ask_id:
+                return {
+                    "success": False,
+                    "error": (
+                        f"Offer {offer_id} has no local volume slot available "
+                        "(avail_vol_ask_id missing) to create a new volume "
+                        "on. Pass an existing volume_id instead, or pick a "
+                        "different offer."
+                    ),
+                }
             vol_info["create_new"] = True
             vol_info["size"] = volume.get("size_gb", 15)
+            vol_info["volume_id"] = avail_vol_ask_id
         body["volume_info"] = vol_info
     return _request("PUT", f"/api/v0/asks/{offer_id}", json=body)
+
+
+@tool
+def destroy_instance(instance_id: int) -> dict[str, Any]:
+    """Destroy (terminate) a rented instance, stopping its billing."""
+    return _request("DELETE", f"/api/v0/instances/{instance_id}/")
 
 
 @tool
