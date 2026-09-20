@@ -32,6 +32,7 @@ from mcp.server.streamable_http_manager import (
     StreamableHTTPSessionManager,
 )
 from starlette.applications import Starlette
+from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -124,6 +125,18 @@ app = Starlette(
     lifespan=lifespan,
 )
 app = PerRequestVastKeyMiddleware(app)
+# CORS must wrap outermost: browsers send an unauthenticated OPTIONS
+# preflight before a cross-origin POST carrying a custom X-Api-Key header,
+# and that preflight has to be answered before PerRequestVastKeyMiddleware
+# ever sees it, or the browser blocks the real request as a CORS failure
+# (this is what breaks claude.ai's web/remote-connector flow while curl,
+# which never preflights, appears to work fine).
+app = CORSMiddleware(
+    app,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["content-type", "accept", "x-api-key", "mcp-session-id"],
+)
 
 def cli() -> None:
     """Synchronous entry point for the `vastai-mcp-http` console script."""
