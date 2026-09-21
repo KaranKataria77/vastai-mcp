@@ -4,7 +4,8 @@ Run:  vastai-mcp-http   (console script; or `python -m vastai_mcp.server_http`)
 Env:  VAST_API_KEY=<your key>  (fallback only — HTTP callers should send
       X-Api-Key per request instead, see below)
       MCP_HOST=0.0.0.0  (default)
-      MCP_PORT=8000     (default)
+      PORT / MCP_PORT=8000  (default; PORT takes precedence -- this is what
+      platforms like Render inject and require the app to bind to)
 
 Endpoints:
   GET  /health  -> liveness check
@@ -40,7 +41,10 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from . import server as mcp_core  # reuses on_list_tools / on_call_tool / _request_api_key
 
 HOST = os.environ.get("MCP_HOST", "0.0.0.0")
-PORT = int(os.environ.get("MCP_PORT", "8000"))
+# PORT is the convention platforms like Render inject and require the
+# container to bind to; MCP_PORT is kept for backward compatibility with
+# existing deployments that set it explicitly.
+PORT = int(os.environ.get("PORT") or os.environ.get("MCP_PORT", "8000"))
 if os.environ.get("MCP_FORCE_PORT"):
     PORT = int(os.environ["MCP_FORCE_PORT"])
 
