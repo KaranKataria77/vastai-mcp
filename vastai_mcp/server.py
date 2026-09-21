@@ -8,6 +8,7 @@ Exposes Vast.ai cloud operations as MCP tools:
   - create_instance: rent a machine (ask/offer) with optional volume
   - destroy_instance: terminate a rented instance
   - get_ssh_connection: SSH command/details for a running instance
+  - get_instance_logs: fetch container/daemon logs for an instance
   - create_api_key: create a new (optionally scoped) Vast.ai API key
   - list_api_keys: list existing API keys on the account
   - delete_api_key: revoke an existing API key by id
@@ -319,6 +320,41 @@ TOOLS: list[types.Tool] = [
                         "Instance/contract id, as returned by "
                         "create_instance (new_contract) or billing_summary."
                     ),
+                },
+            },
+            "required": ["instance_id"],
+        },
+    ),
+    types.Tool(
+        name="get_instance_logs",
+        description=(
+            "Fetch recent logs for an instance by its contract/instance id. "
+            "By default returns container (docker) logs; set daemon_logs to "
+            "fetch the host daemon's system logs instead. Returns the log "
+            "text directly (truncated if very large), plus the S3 URL it "
+            "came from."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "integer",
+                    "description": (
+                        "Instance/contract id, as returned by "
+                        "create_instance (new_contract) or billing_summary."
+                    ),
+                },
+                "tail": {
+                    "type": "string",
+                    "description": "Number of lines from the end of the logs to return, e.g. '200'.",
+                },
+                "filter_str": {
+                    "type": "string",
+                    "description": "Grep-style filter applied to log entries.",
+                },
+                "daemon_logs": {
+                    "type": "boolean",
+                    "description": "Fetch host daemon system logs instead of container logs (default false).",
                 },
             },
             "required": ["instance_id"],
@@ -637,6 +673,63 @@ def get_ssh_connection(instance_id: int) -> dict[str, Any]:
         "ssh_host": ssh_host,
         "ssh_port": ssh_port,
         "ssh_command": f"ssh -p {ssh_port} root@{ssh_host}",
+    }
+
+
+_MAX_LOG_CHARS = 20000
+
+
+@tool
+def get_instance_logs(
+    instance_id: int,
+    tail: str | None = None,
+    filter_str: str | None = None,
+    daemon_logs: bool = False,
+) -> dict[str, Any]:
+    """Request logs for an instance and fetch their content from the resulting S3 URL.
+
+    PUT /api/v0/instances/request_logs/{id} only returns a presigned S3 URL,
+    not the log text itself; this fetches that URL (a different host than
+    BASE_URL, so plain httpx.get, not _request) and returns the text.
+    """
+    body: dict[str, Any] = {}
+    if tail is not None:
+        body["tail"] = tail
+    if filter_str is not None:
+        body["filter"] = filter_str
+    if daemon_logs:
+        body["daemon_logs"] = "true"
+
+    resp = _request("PUT", f"/api/v0/instances/request_logs/{instance_id}/", json=body)
+    result_url = resp.get("result_url")
+    if not result_url:
+        return {
+            "success": False,
+            "instance_id": instance_id,
+            "error": resp.get("msg") or "No result_url returned for logs.",
+        }
+
+    # The API returns the S3 url before the log file is actually written
+    # there ("...in a few seconds"), so a fresh request commonly 403s once
+    # or twice before the object exists.
+    log_resp = None
+    for attempt in range(5):
+        log_resp = httpx.get(result_url, timeout=60.0)
+        if log_resp.status_code < 400:
+            break
+        time.sleep(1.5)
+    log_resp.raise_for_status()
+    text = log_resp.text
+    truncated = len(text) > _MAX_LOG_CHARS
+    if truncated:
+        text = text[-_MAX_LOG_CHARS:]
+
+    return {
+        "success": True,
+        "instance_id": instance_id,
+        "result_url": result_url,
+        "truncated": truncated,
+        "logs": text,
     }
 
 
