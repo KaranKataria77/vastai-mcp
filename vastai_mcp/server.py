@@ -7,6 +7,10 @@ Exposes Vast.ai cloud operations as MCP tools:
   - delete_volume: delete a rented volume
   - create_instance: rent a machine (ask/offer) with optional volume
   - destroy_instance: terminate a rented instance
+  - get_ssh_connection: SSH command/details for a running instance
+  - create_api_key: create a new (optionally scoped) Vast.ai API key
+  - list_api_keys: list existing API keys on the account
+  - delete_api_key: revoke an existing API key by id
   - billing_summary: instance hourly costs + recent charges
 
 Auth: set VAST_API_KEY (Authorization: Bearer <key>).
@@ -297,6 +301,86 @@ TOOLS: list[types.Tool] = [
             "required": ["instance_id"],
         },
     ),
+    types.Tool(
+        name="get_ssh_connection",
+        description=(
+            "Get the SSH connection details/command for a running instance "
+            "by its contract/instance id. Returns the ready-to-use ssh "
+            "command (root@ssh_host:ssh_port) plus the raw host/port fields. "
+            "Fails with a clear message if the instance isn't running yet "
+            "or has no SSH endpoint (e.g. jupyter-only runtype)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "integer",
+                    "description": (
+                        "Instance/contract id, as returned by "
+                        "create_instance (new_contract) or billing_summary."
+                    ),
+                },
+            },
+            "required": ["instance_id"],
+        },
+    ),
+    types.Tool(
+        name="create_api_key",
+        description=(
+            "Create a new Vast.ai API key on the caller's account. Optionally "
+            "scoped down via a permissions object (omit for a full-access "
+            "key, matching an unrestricted key created in the web console). "
+            "Returns the new key id and the plaintext key value (shown only "
+            "once)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Friendly name for the key.",
+                },
+                "permissions": {
+                    "type": "object",
+                    "description": (
+                        "Optional permissions object restricting the key's "
+                        "scope, per Vast.ai's roles-and-permissions format. "
+                        "Omit for full account access."
+                    ),
+                },
+            },
+            "required": ["name"],
+        },
+    ),
+    types.Tool(
+        name="list_api_keys",
+        description=(
+            "List existing Vast.ai API keys on the caller's account (id, "
+            "name, key_type, created_at, deleted_at, etc; the plaintext key "
+            "value itself is never returned by this endpoint). Use this "
+            "before delete_api_key to see what exists and confirm the "
+            "right id."
+        ),
+        input_schema={"type": "object", "properties": {}},
+    ),
+    types.Tool(
+        name="delete_api_key",
+        description=(
+            "Revoke (delete) an existing Vast.ai API key by its id, as "
+            "returned by create_api_key or list_api_keys. Irreversible; any "
+            "client still using that key immediately loses access."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "key_id": {
+                    "type": "integer",
+                    "description": "API key id to delete, as returned by create_api_key.",
+                },
+            },
+            "required": ["key_id"],
+        },
+    ),
 ]
 
 HANDLERS: dict[str, Any] = {}
@@ -512,6 +596,69 @@ def create_instance(
 def destroy_instance(instance_id: int) -> dict[str, Any]:
     """Destroy (terminate) a rented instance, stopping its billing."""
     return _request("DELETE", f"/api/v0/instances/{instance_id}/")
+
+
+@tool
+def get_ssh_connection(instance_id: int) -> dict[str, Any]:
+    """Return the SSH command and connection fields for a running instance.
+
+    GET /api/v0/instances/{id}/ returns ssh_host/ssh_port (the SSH forwarder
+    address for both ssh_proxy and direct runtypes) alongside actual_status.
+    """
+    resp = _request("GET", f"/api/v0/instances/{instance_id}/")
+    inst = resp.get("instances") or {}
+    if not inst:
+        return {
+            "success": False,
+            "error": f"Instance {instance_id} not found.",
+        }
+
+    status = inst.get("actual_status")
+    ssh_host = inst.get("ssh_host")
+    ssh_port = inst.get("ssh_port")
+
+    if not ssh_host or not ssh_port:
+        return {
+            "success": False,
+            "instance_id": instance_id,
+            "status": status,
+            "status_msg": inst.get("status_msg"),
+            "error": (
+                "No SSH endpoint available yet. The instance may still be "
+                "loading, may not be running, or its runtype may not "
+                "expose SSH (e.g. jupyter-only)."
+            ),
+        }
+
+    return {
+        "success": True,
+        "instance_id": instance_id,
+        "status": status,
+        "ssh_host": ssh_host,
+        "ssh_port": ssh_port,
+        "ssh_command": f"ssh -p {ssh_port} root@{ssh_host}",
+    }
+
+
+@tool
+def create_api_key(name: str, permissions: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Create a new API key on the caller's account, optionally scoped."""
+    body: dict[str, Any] = {"name": name}
+    if permissions is not None:
+        body["permissions"] = permissions
+    return _request("POST", "/api/v0/auth/apikeys", json=body)
+
+
+@tool
+def list_api_keys() -> dict[str, Any]:
+    """List all API keys on the caller's account."""
+    return _request("GET", "/api/v0/auth/apikeys/")
+
+
+@tool
+def delete_api_key(key_id: int) -> dict[str, Any]:
+    """Revoke an API key by id."""
+    return _request("DELETE", f"/api/v0/auth/apikeys/{key_id}")
 
 
 @tool
