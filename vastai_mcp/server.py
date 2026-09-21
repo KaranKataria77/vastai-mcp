@@ -7,6 +7,8 @@ Exposes Vast.ai cloud operations as MCP tools:
   - delete_volume: delete a rented volume
   - create_instance: rent a machine (ask/offer) with optional volume
   - destroy_instance: terminate a rented instance
+  - list_deleted_instances: history of previously destroyed instances
+  - search_base_images: search available docker image templates
   - get_ssh_connection: SSH command/details for a running instance
   - get_instance_logs: fetch container/daemon logs for an instance
   - create_api_key: create a new (optionally scoped) Vast.ai API key
@@ -300,6 +302,55 @@ TOOLS: list[types.Tool] = [
                 },
             },
             "required": ["instance_id"],
+        },
+    ),
+    types.Tool(
+        name="list_deleted_instances",
+        description=(
+            "List previously destroyed/terminated instances, most recent "
+            "first, sourced from the account's audit log (there is no "
+            "dedicated Vast.ai endpoint for destroyed-instance records; "
+            "once destroyed, the full instance record like gpu_name/image "
+            "is gone, so this returns instance_id, when it was created "
+            "(rental start, if the matching create event is still within "
+            "the audit log), when it was destroyed, and the rental "
+            "duration in seconds)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Max destroyed instances to return (default 50).",
+                },
+            },
+        },
+    ),
+    types.Tool(
+        name="search_base_images",
+        description=(
+            "Search available docker image templates on Vast.ai to use as "
+            "the image for create_instance. Returns id, name, image, tag, "
+            "and whether it's SSH-capable/recommended. Pass a query to "
+            "filter by name/image substring, or leave empty for the "
+            "recommended set."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Case-insensitive substring to match against template name or image (e.g. 'pytorch', 'comfyui').",
+                },
+                "recommended_only": {
+                    "type": "boolean",
+                    "description": "Only return Vast.ai-recommended templates (default true when query is empty, false otherwise).",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max templates to return (default 30).",
+                },
+            },
         },
     ),
     types.Tool(
@@ -632,6 +683,77 @@ def create_instance(
 def destroy_instance(instance_id: int) -> dict[str, Any]:
     """Destroy (terminate) a rented instance, stopping its billing."""
     return _request("DELETE", f"/api/v0/instances/{instance_id}/")
+
+
+@tool
+def list_deleted_instances(limit: int = 50) -> dict[str, Any]:
+    """List previously destroyed instances from the account's audit log.
+
+    There's no dedicated Vast.ai endpoint for destroyed instances; once
+    destroyed the full instance record (gpu_name, image, etc.) is gone.
+    /api/v0/audit_logs/ logs every API call, so instance_DELETE calls give
+    us instance ids + timestamps, which we pair with the ask_PUT (create)
+    call for the same contract/instance id to recover the rental window.
+    """
+    logs = _request("GET", "/api/v0/audit_logs/")
+    if not isinstance(logs, list):
+        return {"success": False, "error": "Unexpected audit_logs response.", "raw": logs}
+
+    logs_sorted = sorted(logs, key=lambda e: e.get("created_at") or 0)
+    created_at_by_id: dict[Any, float] = {}
+    deletions: list[dict[str, Any]] = []
+    for entry in logs_sorted:
+        route = entry.get("api_route")
+        args = entry.get("args") or {}
+        if route == "api.ask_PUT" and "contract_id" in args:
+            created_at_by_id[args["contract_id"]] = entry.get("created_at")
+        elif route == "api.instance_DELETE" and "instance_id" in args:
+            iid = args["instance_id"]
+            created_at = created_at_by_id.pop(iid, None)
+            deleted_at = entry.get("created_at")
+            deletions.append(
+                {
+                    "instance_id": iid,
+                    "created_at": created_at,
+                    "deleted_at": deleted_at,
+                    "duration_seconds": (
+                        round(deleted_at - created_at, 1)
+                        if created_at and deleted_at
+                        else None
+                    ),
+                }
+            )
+
+    deletions.sort(key=lambda e: e.get("deleted_at") or 0, reverse=True)
+    return {"success": True, "deleted_instances": deletions[:limit]}
+
+
+@tool
+def search_base_images(
+    query: str | None = None,
+    recommended_only: bool | None = None,
+    limit: int = 30,
+) -> dict[str, Any]:
+    """Search available docker image templates usable as create_instance's image."""
+    if recommended_only is None:
+        recommended_only = not query
+    select_filters: dict[str, Any] = {}
+    if recommended_only:
+        select_filters["recommended"] = {"eq": True}
+    params = {
+        "select_cols": json.dumps(["id", "name", "image", "tag", "recommended", "use_ssh", "tags"]),
+    }
+    if select_filters:
+        params["select_filters"] = json.dumps(select_filters)
+    resp = _request("GET", "/api/v0/template", params=params)
+    templates = resp.get("templates") or []
+    if query:
+        q = query.lower()
+        templates = [
+            t for t in templates
+            if q in (t.get("name") or "").lower() or q in (t.get("image") or "").lower()
+        ]
+    return {"success": True, "templates": templates[:limit]}
 
 
 @tool
