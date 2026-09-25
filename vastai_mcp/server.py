@@ -11,6 +11,7 @@ Exposes Vast.ai cloud operations as MCP tools:
   - search_base_images: search available docker image templates
   - get_ssh_connection: SSH command/details for a running instance
   - get_instance_endpoint: public http URL(s) for an instance's exposed ports
+  - call_instance_endpoint: make an HTTP request to a service on an instance
   - get_instance_logs: fetch container/daemon logs for an instance
   - create_api_key: create a new (optionally scoped) Vast.ai API key
   - list_api_keys: list existing API keys on the account
@@ -429,6 +430,53 @@ TOOLS: list[types.Tool] = [
                 },
             },
             "required": ["instance_id"],
+        },
+    ),
+    types.Tool(
+        name="call_instance_endpoint",
+        description=(
+            "Make an HTTP request to a service running on a rented instance "
+            "(e.g. vLLM's /v1/completions after create_instance's onstart "
+            "launched it) - pure API, no SSH/CLI required. Resolves the "
+            "container_port's public endpoint the same way as "
+            "get_instance_endpoint, then issues the request directly and "
+            "returns the status code and body. Use this instead of a "
+            "generic web-fetch tool: those force plain http:// URLs to "
+            "https://, which breaks non-TLS dev servers like vLLM's."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "integer",
+                    "description": (
+                        "Instance/contract id, as returned by "
+                        "create_instance (new_contract) or billing_summary."
+                    ),
+                },
+                "container_port": {
+                    "type": "integer",
+                    "description": "The exposed container port to call (e.g. 8000).",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Request path, e.g. '/v1/completions' (default '/').",
+                },
+                "method": {
+                    "type": "string",
+                    "enum": ["GET", "POST", "PUT", "DELETE", "PATCH"],
+                    "description": "HTTP method (default GET).",
+                },
+                "json_body": {
+                    "type": "object",
+                    "description": "JSON request body, e.g. vLLM completion params.",
+                },
+                "timeout_seconds": {
+                    "type": "number",
+                    "description": "Request timeout in seconds (default 30).",
+                },
+            },
+            "required": ["instance_id", "container_port"],
         },
     ),
     types.Tool(
@@ -859,11 +907,13 @@ def get_ssh_connection(instance_id: int) -> dict[str, Any]:
     }
 
 
-@tool
-def get_instance_endpoint(
-    instance_id: int, container_port: int | None = None
+_WILDCARD_IPS = {"0.0.0.0", "::", "", None}
+
+
+def _resolve_instance_endpoints(
+    instance_id: int, container_port: int | None
 ) -> dict[str, Any]:
-    """Return publicly reachable http(s) URLs for an instance's exposed ports.
+    """Shared resolver behind get_instance_endpoint and call_instance_endpoint.
 
     GET /api/v0/instances/{id}/ carries the port mapping, but Vast.ai's
     "ports" field shape is inconsistent across hosts: sometimes a Docker-style
@@ -871,6 +921,8 @@ def get_instance_endpoint(
     list of container port ints (host port assumed == container port on
     direct-networking hosts). Both are handled defensively; public_ipaddr is
     used as the reachable host in both cases (ssh_host is for SSH only).
+    HostIp is Docker's bind address (0.0.0.0/::), not routable, so it's
+    substituted with the instance's public IP.
     """
     resp = _request("GET", f"/api/v0/instances/{instance_id}/")
     inst = resp.get("instances") or {}
@@ -881,7 +933,6 @@ def get_instance_endpoint(
     public_ip = inst.get("public_ipaddr")
     ports = inst.get("ports")
 
-    _WILDCARD_IPS = {"0.0.0.0", "::", "", None}
     endpoints: list[dict[str, Any]] = []
     seen: set[tuple[Any, Any]] = set()
     if isinstance(ports, dict):
@@ -894,9 +945,6 @@ def get_instance_endpoint(
                 continue
             for binding in bindings or []:
                 host_ip = binding.get("HostIp")
-                # HostIp is Docker's bind address (0.0.0.0/::), not a
-                # routable address; the actual reachable host is the
-                # instance's public IP.
                 if host_ip in _WILDCARD_IPS:
                     host_ip = public_ip
                 host_port = binding.get("HostPort")
@@ -953,7 +1001,68 @@ def get_instance_endpoint(
     }
 
 
+@tool
+def get_instance_endpoint(
+    instance_id: int, container_port: int | None = None
+) -> dict[str, Any]:
+    """Return publicly reachable http(s) URLs for an instance's exposed ports."""
+    return _resolve_instance_endpoints(instance_id, container_port)
+
+
 _MAX_LOG_CHARS = 20000
+_MAX_HTTP_BODY_CHARS = 20000
+
+
+@tool
+def call_instance_endpoint(
+    instance_id: int,
+    container_port: int,
+    path: str = "/",
+    method: str = "GET",
+    json_body: dict[str, Any] | None = None,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Make an HTTP request to a service running on a rented instance.
+
+    Pure API, no SSH/CLI: resolves the container_port's public endpoint via
+    the same logic as get_instance_endpoint, then issues the request directly
+    (a WebFetch-style tool can't be used here since it force-upgrades plain
+    http:// to https://, which breaks these non-TLS dev servers like vLLM).
+    Intended for calling an API server started via create_instance's onstart
+    (e.g. vLLM's /v1/completions) to verify it's actually serving, without
+    needing SSH access to the instance.
+    """
+    resolved = _resolve_instance_endpoints(instance_id, container_port)
+    if not resolved.get("success"):
+        return resolved
+
+    endpoint = resolved["endpoints"][0]
+    url = endpoint["url"].rstrip("/") + "/" + path.lstrip("/")
+
+    try:
+        with httpx.Client(timeout=timeout_seconds) as client:
+            resp = client.request(method.upper(), url, json=json_body)
+    except httpx.HTTPError as exc:
+        return {
+            "success": False,
+            "instance_id": instance_id,
+            "url": url,
+            "error": f"Request failed: {exc}",
+        }
+
+    body = resp.text
+    truncated = len(body) > _MAX_HTTP_BODY_CHARS
+    if truncated:
+        body = body[:_MAX_HTTP_BODY_CHARS]
+
+    return {
+        "success": True,
+        "instance_id": instance_id,
+        "url": url,
+        "status_code": resp.status_code,
+        "body": body,
+        "truncated": truncated,
+    }
 
 
 @tool
