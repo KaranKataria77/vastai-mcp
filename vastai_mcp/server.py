@@ -240,6 +240,25 @@ TOOLS: list[types.Tool] = [
                     "type": "string",
                     "description": "Docker flags, e.g. '-e HF_TOKEN=hf_xxx -p 8000:8000'.",
                 },
+                "onstart": {
+                    "type": "string",
+                    "description": (
+                        "Shell command(s) to run after the instance's SSH/"
+                        "Jupyter entrypoint initializes (runtype ssh/jupyter/"
+                        "*_direct/*_proxy). E.g. 'vllm serve $MODEL_ID "
+                        "--port 8000 --host 0.0.0.0' to serve a model with "
+                        "a pre-built vLLM image, combined with env to set "
+                        "MODEL_ID and expose the port."
+                    ),
+                },
+                "args_str": {
+                    "type": "string",
+                    "description": (
+                        "Arguments appended to the image's Docker CMD "
+                        "(entrypoint preserved). Only used when runtype is "
+                        "'args'; ignored otherwise."
+                    ),
+                },
                 "volume": {
                     "type": "object",
                     "description": "Volume to attach, created on the fly if volume_id is omitted.",
@@ -614,6 +633,8 @@ def create_instance(
     runtype: str = "ssh",
     target_state: str = "running",
     env: str | None = None,
+    onstart: str | None = None,
+    args_str: str | None = None,
     volume: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create an instance on the given offer, optionally with a volume.
@@ -655,6 +676,10 @@ def create_instance(
         body["disk"] = disk_gb
     if env:
         body["env"] = env
+    if onstart:
+        body["onstart"] = onstart
+    if args_str:
+        body["args_str"] = args_str
     if volume:
         vol_info: dict[str, Any] = {"mount_path": volume.get("mount_path", "/data")}
         if volume.get("volume_id"):
