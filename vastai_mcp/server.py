@@ -10,6 +10,7 @@ Exposes Vast.ai cloud operations as MCP tools:
   - list_deleted_instances: history of previously destroyed instances
   - search_base_images: search available docker image templates
   - get_ssh_connection: SSH command/details for a running instance
+  - get_instance_endpoint: public http URL(s) for an instance's exposed ports
   - get_instance_logs: fetch container/daemon logs for an instance
   - create_api_key: create a new (optionally scoped) Vast.ai API key
   - list_api_keys: list existing API keys on the account
@@ -389,6 +390,41 @@ TOOLS: list[types.Tool] = [
                     "description": (
                         "Instance/contract id, as returned by "
                         "create_instance (new_contract) or billing_summary."
+                    ),
+                },
+            },
+            "required": ["instance_id"],
+        },
+    ),
+    types.Tool(
+        name="get_instance_endpoint",
+        description=(
+            "Get the publicly reachable HTTP URL(s) for a running instance's "
+            "exposed container ports (e.g. the port opened via create_instance's "
+            "env, like '-p 8000:8000' for a vLLM/API server) - pure API, no "
+            "SSH/CLI required. Vast.ai NATs each exposed container port to a "
+            "random external port on the host's shared public IP; this "
+            "resolves that mapping so the port is directly callable over "
+            "HTTP. Pass container_port to get just that one URL. Returns an "
+            "error if the instance is still loading or the port isn't "
+            "exposed yet (mappings can take a few seconds to appear after "
+            "the container starts)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "integer",
+                    "description": (
+                        "Instance/contract id, as returned by "
+                        "create_instance (new_contract) or billing_summary."
+                    ),
+                },
+                "container_port": {
+                    "type": "integer",
+                    "description": (
+                        "Only return the URL for this container port (e.g. "
+                        "8000). Omit to return all exposed ports."
                     ),
                 },
             },
@@ -820,6 +856,89 @@ def get_ssh_connection(instance_id: int) -> dict[str, Any]:
         "ssh_host": ssh_host,
         "ssh_port": ssh_port,
         "ssh_command": f"ssh -p {ssh_port} root@{ssh_host}",
+    }
+
+
+@tool
+def get_instance_endpoint(
+    instance_id: int, container_port: int | None = None
+) -> dict[str, Any]:
+    """Return publicly reachable http(s) URLs for an instance's exposed ports.
+
+    GET /api/v0/instances/{id}/ carries the port mapping, but Vast.ai's
+    "ports" field shape is inconsistent across hosts: sometimes a Docker-style
+    dict ({"8000/tcp": [{"HostIp": ..., "HostPort": ...}]}), sometimes a plain
+    list of container port ints (host port assumed == container port on
+    direct-networking hosts). Both are handled defensively; public_ipaddr is
+    used as the reachable host in both cases (ssh_host is for SSH only).
+    """
+    resp = _request("GET", f"/api/v0/instances/{instance_id}/")
+    inst = resp.get("instances") or {}
+    if not inst:
+        return {"success": False, "error": f"Instance {instance_id} not found."}
+
+    status = inst.get("actual_status")
+    public_ip = inst.get("public_ipaddr")
+    ports = inst.get("ports")
+
+    endpoints: list[dict[str, Any]] = []
+    if isinstance(ports, dict):
+        for key, bindings in ports.items():
+            c_port_str = key.split("/")[0]
+            if not c_port_str.isdigit():
+                continue
+            c_port = int(c_port_str)
+            if container_port is not None and c_port != container_port:
+                continue
+            for binding in bindings or []:
+                host_ip = binding.get("HostIp") or public_ip
+                host_port = binding.get("HostPort")
+                if not host_ip or not host_port:
+                    continue
+                endpoints.append(
+                    {
+                        "container_port": c_port,
+                        "host_ip": host_ip,
+                        "host_port": int(host_port),
+                        "url": f"http://{host_ip}:{host_port}",
+                    }
+                )
+    elif isinstance(ports, list):
+        for c_port in ports:
+            if container_port is not None and c_port != container_port:
+                continue
+            if not public_ip:
+                continue
+            endpoints.append(
+                {
+                    "container_port": c_port,
+                    "host_ip": public_ip,
+                    "host_port": c_port,
+                    "url": f"http://{public_ip}:{c_port}",
+                }
+            )
+
+    if not endpoints:
+        return {
+            "success": False,
+            "instance_id": instance_id,
+            "status": status,
+            "status_msg": inst.get("status_msg"),
+            "public_ipaddr": public_ip,
+            "raw_ports": ports,
+            "error": (
+                "No exposed port endpoint found. The instance may still be "
+                "loading, may not have been created with a direct-networking "
+                "runtype (ssh_direct/jupyter_direct/args), or the requested "
+                "container_port isn't exposed."
+            ),
+        }
+
+    return {
+        "success": True,
+        "instance_id": instance_id,
+        "status": status,
+        "endpoints": endpoints,
     }
 
 
