@@ -881,7 +881,9 @@ def get_instance_endpoint(
     public_ip = inst.get("public_ipaddr")
     ports = inst.get("ports")
 
+    _WILDCARD_IPS = {"0.0.0.0", "::", "", None}
     endpoints: list[dict[str, Any]] = []
+    seen: set[tuple[Any, Any]] = set()
     if isinstance(ports, dict):
         for key, bindings in ports.items():
             c_port_str = key.split("/")[0]
@@ -891,10 +893,19 @@ def get_instance_endpoint(
             if container_port is not None and c_port != container_port:
                 continue
             for binding in bindings or []:
-                host_ip = binding.get("HostIp") or public_ip
+                host_ip = binding.get("HostIp")
+                # HostIp is Docker's bind address (0.0.0.0/::), not a
+                # routable address; the actual reachable host is the
+                # instance's public IP.
+                if host_ip in _WILDCARD_IPS:
+                    host_ip = public_ip
                 host_port = binding.get("HostPort")
                 if not host_ip or not host_port:
                     continue
+                dedupe_key = (host_ip, host_port)
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
                 endpoints.append(
                     {
                         "container_port": c_port,
